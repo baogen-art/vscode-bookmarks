@@ -18,11 +18,13 @@ import { loadBookmarks, saveBookmarks } from "./storage/workspaceState";
 import { pickController } from "./quickpick/controllerPicker";
 import { expandSelectionToNextBookmark, selectBookmarkedLines, shrinkSelection } from "./selections";
 import { BookmarksExplorer } from "./sidebar/bookmarkProvider";
+import { BookmarksSearchViewProvider } from "./sidebar/searchViewProvider";
 import { parsePosition, Point } from "./sidebar/parser";
 import { Sticky } from "./sticky/stickyLegacy";
 import { updateStickyBookmarks } from "./sticky/sticky";
 import { suggestLabel, useSelectionWhenAvailable } from "./suggestion";
 import { appendPath, getRelativePath } from "./utils/fs";
+import { formatBookmarkLabel } from "./utils/label";
 import { isInDiffEditor, previewPositionInDocument, revealPosition } from "./utils/reveal";
 import { registerOpenSettings } from "./commands/openSettings";
 import { registerSupportBookmarks } from "./commands/supportBookmarks";
@@ -44,6 +46,9 @@ export async function activate(context: vscode.ExtensionContext) {
     let controllers: Controller[] = [];
     let activeEditorCountLine: number;
     let timeout = null;
+    let activeEditor = vscode.window.activeTextEditor;
+    let bookmarkDecorationType = createBookmarkDecorations();
+    context.subscriptions.push(...bookmarkDecorationType);
 
     await registerWhatsNew();
     await registerWalkthrough();
@@ -61,53 +66,24 @@ export async function activate(context: vscode.ExtensionContext) {
     registerExport(() => controllers);
     registerHelpAndFeedbackView(context);
 
-    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(cfg => {
-        // Allow change the gutterIcon without reload
-        if (cfg.affectsConfiguration("bookmarks.gutterIconFillColor") || 
-            cfg.affectsConfiguration("bookmarks.gutterIconBorderColor") ||
-            cfg.affectsConfiguration("bookmarks.overviewRulerLane")) {
-            if (bookmarkDecorationType.length > 0) {
-                bookmarkDecorationType.forEach(b => b.dispose());
-            }
-
-            bookmarkDecorationType = createBookmarkDecorations();
-            context.subscriptions.push(...bookmarkDecorationType);
-
-            updateDecorations();
-            bookmarkProvider.refresh();
-        }
-        
-        if (cfg.affectsConfiguration("bookmarks.saveBookmarksInProject")) {
-            splitOrMergeFilesInMultiRootControllers();
-            saveWorkspaceState();
-        }
-
-        if (cfg.affectsConfiguration("bookmarks.sideBar.countBadge")) {
-            bookmarkExplorer.updateBadge();
-        }
-
-        if (cfg.affectsConfiguration("bookmarks.sideBar.hideWelcome")) {
-            toggleSideBarWelcomeVisibility();
-        }
-    }));
-
-    let bookmarkDecorationType = createBookmarkDecorations();
-    context.subscriptions.push(...bookmarkDecorationType);
-
-    // Connect it to the Editors Events
-    let activeEditor = vscode.window.activeTextEditor;
-
-    if (activeEditor) {
-        getActiveController(activeEditor.document);
-        activeController.addFile(activeEditor.document.uri);
-        activeEditorCountLine = activeEditor.document.lineCount;
-        activeController.activeFile = activeController.fromUri(activeEditor.document.uri);
-        triggerUpdateDecorations();
-        updateLinesWithBookmarkContext(activeController.activeFile);
-    }
+    const searchViewProvider = new BookmarksSearchViewProvider(context.extensionUri, controllers);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(BookmarksSearchViewProvider.viewType, searchViewProvider)
+    );
 
     const bookmarkExplorer = new BookmarksExplorer(controllers);
     const bookmarkProvider = bookmarkExplorer.getProvider();    
+
+    let searchDebounceTimeout: NodeJS.Timeout | undefined;
+    searchViewProvider.onDidChangeSearchQuery(query => {
+        if (searchDebounceTimeout) {
+            clearTimeout(searchDebounceTimeout);
+        }
+        searchDebounceTimeout = setTimeout(() => {
+            bookmarkProvider.filterQuery = query;
+            searchDebounceTimeout = undefined;
+        }, 500);
+    });
 
     bookmarkExplorer.updateBadge();
 
@@ -130,17 +106,27 @@ export async function activate(context: vscode.ExtensionContext) {
         bookmarkProvider.refresh();
     }   
     
-    const viewAsList = Container.context.globalState.get<boolean>("viewAsList", false);
+    const viewAsList = Container.context.globalState.get<boolean>("viewAsList", true);
     vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", viewAsList);
+    const viewAsGrouped = Container.context.globalState.get<boolean>("viewAsGrouped", false);
+    vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", viewAsGrouped);
     vscode.commands.registerCommand("_bookmarks.viewAsTree#sideBar", () => toggleViewAs(ViewAs.VIEW_AS_TREE));
     vscode.commands.registerCommand("_bookmarks.viewAsList#sideBar", () => toggleViewAs(ViewAs.VIEW_AS_LIST));
+    vscode.commands.registerCommand("_bookmarks.viewAsGrouped#sideBar", () => toggleViewAs(ViewAs.VIEW_AS_GROUPED));
+    vscode.commands.registerCommand("_bookmarks.viewAsGrouped#sideBar_off", () => toggleViewAs(ViewAs.VIEW_AS_TREE));
     function toggleViewAs(view: ViewAs) {
         if (view === ViewAs.VIEW_AS_LIST) {
             vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", true);
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", false);
+        } else if (view === ViewAs.VIEW_AS_GROUPED) {
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", false);
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", true);
         } else {
             vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", false);
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", false);
         }
         Container.context.globalState.update("viewAsList", view === ViewAs.VIEW_AS_LIST);
+        Container.context.globalState.update("viewAsGrouped", view === ViewAs.VIEW_AS_GROUPED);
         bookmarkProvider.refresh();
     }
 
@@ -740,7 +726,8 @@ export async function activate(context: vscode.ExtensionContext) {
             if (index >= 0) {
                 activeController.removeBookmark(index, position.line, book);
             }
-            activeController.addBookmark(position, bookmarkLabel, book);
+            const formattedLabel = formatBookmarkLabel(bookmarkLabel);
+            activeController.addBookmark(position, formattedLabel, book);
             
             // toggle editing mode
             if (jumpToPosition) {
@@ -822,7 +809,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
         let suggestion = suggestLabel(vscode.window.activeTextEditor.selection);
         if (!params && suggestion !== "" && useSelectionWhenAvailable()) {
-            if (await activeController.toggle(selections, suggestion)) {
+            const formattedSuggestion = formatBookmarkLabel(suggestion);
+            if (await activeController.toggle(selections, formattedSuggestion)) {
                 vscode.window.showTextDocument(vscode.window.activeTextEditor.document, {preview: false, viewColumn: vscode.window.activeTextEditor.viewColumn} );
             }
             sortBookmarks(activeController.activeFile); 
@@ -856,7 +844,8 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        if (await activeController.toggle(selections, newLabel)) {
+        const formattedLabel = formatBookmarkLabel(newLabel);
+        if (await activeController.toggle(selections, formattedLabel)) {
             vscode.window.showTextDocument(vscode.window.activeTextEditor.document, {preview: false, viewColumn: vscode.window.activeTextEditor.viewColumn} );
         }
 

@@ -60,6 +60,11 @@
         "views": {
             "bookmarks": [
                 {
+                    "id": "bookmarksSearch",
+                    "type": "webview",
+                    "name": "Search Bookmarks"
+                },
+                {
                     "id": "bookmarksExplorer",
                     "name": "%bookmarks.views.Explorer.name%"
                 },
@@ -154,6 +159,18 @@
                 "title": "%bookmarks.commands.viewAsList#sideBar.title%",
                 "icon": "$(list-flat)",
                 "enablement": "!bookmarks.viewAsList"
+            },
+            {
+                "command": "_bookmarks.viewAsGrouped#sideBar",
+                "title": "分组",
+                "icon": "$(layers)",
+                "enablement": "!bookmarks.viewAsGrouped"
+            },
+            {
+                "command": "_bookmarks.viewAsGrouped#sideBar_off",
+                "title": "禁用分组",
+                "icon": "$(layers)",
+                "enablement": "bookmarks.viewAsGrouped"
             },
             {
                 "command": "bookmarks.openSettings",
@@ -350,6 +367,16 @@
                     "group": "navigation@10"
                 },
                 {
+                    "command": "_bookmarks.viewAsGrouped#sideBar",
+                    "when": "view == bookmarksExplorer && !bookmarks.viewAsGrouped",
+                    "group": "navigation@11"
+                },
+                {
+                    "command": "_bookmarks.viewAsGrouped#sideBar_off",
+                    "when": "view == bookmarksExplorer && bookmarks.viewAsGrouped",
+                    "group": "navigation@11"
+                },
+                {
                     "submenu": "bookmarks.sideBar.title",
                     "when": "view == bookmarksExplorer",
                     "group": "1_bookmarks"
@@ -452,6 +479,16 @@
                 {
                     "command": "_bookmarks.viewAsList#sideBar",
                     "group": "bookmarks#sideBar.view@2"
+                },
+                {
+                    "command": "_bookmarks.viewAsGrouped#sideBar",
+                    "group": "bookmarks#sideBar.view@3",
+                    "when": "!bookmarks.viewAsGrouped"
+                },
+                {
+                    "command": "_bookmarks.viewAsGrouped#sideBar_off",
+                    "group": "bookmarks#sideBar.view@3",
+                    "when": "bookmarks.viewAsGrouped"
                 }
             ]
         },

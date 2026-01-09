@@ -13,10 +13,11 @@ import { Container } from "../core/container";
 import { FileNode } from "./fileNode";
 import { BookmarkNode, BookmarkPreview } from "./bookmarkNode";
 import { WorkspaceNode } from "./workspaceNode";
-import { BookmarkNodeKind } from "./nodes";
+import { GroupNode } from "./groupNode";
+import { BookmarkNodeKind, ViewAs } from "./nodes";
 import { BadgeConfig } from "../core/constants";
 
-export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | WorkspaceNode | FileNode> {
+export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | WorkspaceNode | FileNode | GroupNode> {
 
     // tslint:disable-next-line: variable-name
     private _onDidChangeTreeData: vscode.EventEmitter<BookmarkNode | void> = new vscode.EventEmitter<BookmarkNode | void>();
@@ -26,6 +27,8 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
     private tree: BookmarkNode[] = [];
 
     private collapsibleState = vscode.TreeItemCollapsibleState.Collapsed;
+
+    private _filterQuery: string = "";
 
     constructor(private controllers: Controller[]) {
 
@@ -165,12 +168,45 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
         this._onDidChangeTreeData.fire();
     }
 
-    public getTreeItem(element: BookmarkNode): vscode.TreeItem {
+    public set filterQuery(query: string) {
+        this._filterQuery = query;
+        this.refresh();
+    }
+
+    private _matchesFilter(label: string | undefined): boolean {
+        if (!this._filterQuery || this._filterQuery.trim() === "") {
+            return true;
+        }
+
+        if (!label) {
+            return false;
+        }
+
+        // 提取方括号内的内容 [xx-xx-xx]
+        const match = label.match(/^\[(.*?)\]/);
+        if (!match) {
+            return false;
+        }
+
+        const bracketContent = match[1].toLowerCase();
+        const searchTerms = this._filterQuery.toLowerCase()
+            .split(/[^a-zA-Z0-9]+/)
+            .filter(term => term.length > 0);
+
+        if (searchTerms.length === 0) {
+            return true;
+        }
+
+        // 匹配逻辑：搜索词中的每一项都必须在方括号内容中找到
+        return searchTerms.every(term => bracketContent.includes(term));
+    }
+
+    public getTreeItem(element: BookmarkNode | GroupNode | FileNode | WorkspaceNode): vscode.TreeItem {
         return element;
     }
 
     // very much based in `listFromAllFiles` command
-    public getChildren(element?: FileNode | WorkspaceNode): Thenable<BookmarkNode[] | WorkspaceNode[] | FileNode[]> {
+    public getChildren(element?: FileNode | WorkspaceNode | GroupNode): Thenable<BookmarkNode[] | WorkspaceNode[] | FileNode[] | GroupNode[]> {
 
         // no bookmark
         // let totalBookmarkCount = 0;
@@ -220,6 +256,13 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
                                                 if (bb.path === elementInside.detail) {
 
                                                     const point: Point = parsePosition(elementInside.description);
+                                                    
+                                                    // 模糊搜索过滤
+                                                    const rawLabel = elementInside.label.replace(codicons.tag, "").trim();
+                                                    if (!this._matchesFilter(rawLabel)) {
+                                                        continue;
+                                                    }
+
                                                     books.push(
                                                         {
                                                             file: elementInside.detail,
@@ -247,20 +290,34 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
                     return
                 }
 
-                if (element.kind === BookmarkNodeKind.NODE_FILE) {
+                if (element.kind === BookmarkNodeKind.NODE_FILE || element.kind === BookmarkNodeKind.NODE_GROUP) {
                     const ll: BookmarkNode[] = [];
 
-                    const ne = <BookmarkNode>element;
+                    const ne = <BookmarkNode | GroupNode | FileNode>element;
+                    const isGroup = element.kind === BookmarkNodeKind.NODE_GROUP;
 
                     const hidePosition = Container.context.globalState.get<boolean>("bookmarks.sidebar.hidePosition", false);
 
                     for (const bbb of ne.books) {
-                        ll.push(new BookmarkNode(bbb.preview, !hidePosition ? `(Ln ${bbb.line}, Col ${bbb.column})` : undefined, vscode.TreeItemCollapsibleState.None, BookmarkNodeKind.NODE_BOOKMARK, null, [], {
+                        let label = bbb.preview;
+                        if (isGroup) {
+                            // 分组模式下去掉 [xxx] 标签部分
+                            label = label.replace(/^✎\s*\[.*?\]/, "✎ ");
+                        }
+
+                        ll.push(new BookmarkNode(label, !hidePosition ? `(Ln ${bbb.line}, Col ${bbb.column})` : undefined, vscode.TreeItemCollapsibleState.None, BookmarkNodeKind.NODE_BOOKMARK, null, [], {
                             command: "_bookmarks.jumpTo",
                             title: "",
                             arguments: [ bbb.file, bbb.line, bbb.column, bbb.uri ],
                         }));
                     }
+
+                    // 排序：按标签字典序排列
+                    ll.sort((a, b) => {
+                        const labelA = (a.label as string) || "";
+                        const labelB = (b.label as string) || "";
+                        return labelA.localeCompare(labelB);
+                    });
 
                     resolve(ll);
                 } else {
@@ -270,9 +327,10 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
 
                 //
                 const viewAsList = Container.context.globalState.get<boolean>("viewAsList", false);
+                const viewAsGrouped = Container.context.globalState.get<boolean>("viewAsGrouped", false);
 
                 // has more than one controller/worskpace and View As TREE, just loop through the controllers and returns its workspaces
-                if (this.controllers.length > 1 && !viewAsList) {
+                if (this.controllers.length > 1 && !viewAsList && !viewAsGrouped) {
                     const workspaces = [];
                     for (const controller of this.controllers) {
                         const wn: WorkspaceNode = new WorkspaceNode(controller.workspaceFolder.name, controller.workspaceFolder,
@@ -300,6 +358,8 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
 
                         // raw list
                         const lll: FileNode[] = [];
+                        const allBooks: BookmarkPreview[] = [];
+
                         for (const controller of this.controllers) {
                             for (const bb of controller.files) {
 
@@ -316,15 +376,22 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
                                                 if (bb.path === elementInside.detail) {
 
                                                     const point: Point = parsePosition(elementInside.description);
-                                                    books.push(
-                                                        {
-                                                            file: elementInside.detail,
-                                                            line: point.line,
-                                                            column: point.column,
-                                                            preview: elementInside.label.replace(codicons.tag, "\u270E"),
-                                                            uri: elementInside.uri
-                                                        }
-                                                    );
+
+                                                    // 模糊搜索过滤
+                                                    const rawLabel = elementInside.label.replace(codicons.tag, "").trim();
+                                                    if (!this._matchesFilter(rawLabel)) {
+                                                        continue;
+                                                    }
+
+                                                    const bPreview: BookmarkPreview = {
+                                                        file: elementInside.detail,
+                                                        line: point.line,
+                                                        column: point.column,
+                                                        preview: elementInside.label.replace(codicons.tag, "\u270E"),
+                                                        uri: elementInside.uri
+                                                    };
+                                                    books.push(bPreview);
+                                                    allBooks.push(bPreview);
                                                 }
                                             }
                                         }
@@ -336,6 +403,63 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
                                     // this.tree.push(bn);
                                 }
                             }
+                        }
+
+                        // 分组展示逻辑 (优化版：O(N) 复杂度，空间换时间)
+                        if (viewAsGrouped) {
+                            const groupsMap = new Map<string, BookmarkPreview[]>();
+                            const actualTags = new Set<string>();
+                            
+                            // 预提取书签的标签，避免在循环中重复匹配正则
+                            const booksWithTags = allBooks.map(book => {
+                                const match = book.preview.match(/^✎\s*\[(.*?)\]/);
+                                return {
+                                    book,
+                                    tag: match ? match[1] : null
+                                };
+                            });
+
+                            // 1. 预处理：提取所有书签中实际存在的完整标签
+                            booksWithTags.forEach(item => {
+                                if (item.tag) {
+                                    actualTags.add(item.tag);
+                                }
+                            });
+
+                            // 2. 遍历实际存在的标签，建立分组
+                            actualTags.forEach(groupTag => {
+                                const groupKey = `[${groupTag}]`;
+                                
+                                // 只有当分组标签本身满足搜索过滤条件时才处理
+                                if (!this._matchesFilter(groupKey)) {
+                                    return;
+                                }
+
+                                const groupBooks: BookmarkPreview[] = [];
+                                booksWithTags.forEach(item => {
+                                    if (item.tag) {
+                                        // 最小满足逻辑：书签标签以分组标签开头（且紧跟 "-" 或结束）
+                                        if (item.tag === groupTag || item.tag.startsWith(groupTag + "-")) {
+                                            groupBooks.push(item.book);
+                                        }
+                                    }
+                                });
+
+                                if (groupBooks.length > 0) {
+                                    groupsMap.set(groupKey, groupBooks);
+                                }
+                            });
+
+                            // 3. 转换为分组节点
+                            const groupNodes: GroupNode[] = [];
+                            groupsMap.forEach((books, label) => {
+                                groupNodes.push(new GroupNode(label, this.collapsibleState, BookmarkNodeKind.NODE_GROUP, books));
+                            });
+
+                            // 4. 排序：按标签名称排序
+                            groupNodes.sort((a, b) => a.label.localeCompare(b.label));
+                            resolve(groupNodes);
+                            return;
                         }
 
                         // choose the view
@@ -351,10 +475,25 @@ export class BookmarkProvider implements vscode.TreeDataProvider<BookmarkNode | 
                                     }));
                                 }
                             });
+
+                            // 排序：列表模式下按标签字典序排列
+                            bookmarkNodes.sort((a, b) => {
+                                const labelA = (a.label as string) || "";
+                                const labelB = (b.label as string) || "";
+                                return labelA.localeCompare(labelB);
+                            });
+
                             resolve(bookmarkNodes);
+                            return;
                         }
                         
                         // viewAsTree returns FileNode[]
+                        // 排序：树模式下按文件名字典序排列
+                        lll.sort((a, b) => {
+                            const labelA = (a.label as string) || "";
+                            const labelB = (b.label as string) || "";
+                            return labelA.localeCompare(labelB);
+                        });
                         resolve(lll);
                     }
                 );
@@ -372,7 +511,7 @@ function removeRelativePathFromFile(aPath: string): string {
 
 export class BookmarksExplorer {
 
-    private bookmarksExplorer: vscode.TreeView<BookmarkNode | WorkspaceNode | FileNode>;
+    private bookmarksExplorer: vscode.TreeView<BookmarkNode | WorkspaceNode | FileNode | GroupNode>;
     private treeDataProvider: BookmarkProvider;
     private controllers: Controller[];
 
