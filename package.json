@@ -62,11 +62,17 @@
                 {
                     "id": "bookmarksSearch",
                     "type": "webview",
-                    "name": "Search Bookmarks"
+                    "name": "搜索",
+                    "visibility": "visible"
                 },
                 {
                     "id": "bookmarksExplorer",
                     "name": "%bookmarks.views.Explorer.name%"
+                },
+                {
+                    "id": "bookmarksOrganize",
+                    "type": "webview",
+                    "name": "分组整理"
                 },
                 {
                     "id": "bookmarksHelpAndFeedback",
@@ -252,6 +258,16 @@
                 "command": "bookmarks.export",
                 "title": "%bookmarks.commands.export.title%",
                 "category": "%bookmarks.commands.category.bookmarks%"
+            },
+            {
+                "command": "bookmarks.organize.search",
+                "title": "在整理区搜索",
+                "icon": "$(search)"
+            },
+            {
+                "command": "bookmarks.organize.refresh",
+                "title": "重新加载整理区",
+                "icon": "$(refresh)"
             }
         ],
         "menus": {
@@ -395,6 +411,16 @@
                     "command": "bookmarks.openSettings",
                     "when": "view == bookmarksExplorer",
                     "group": "3_bookmarks"
+                },
+                {
+                    "command": "bookmarks.organize.search",
+                    "when": "view == bookmarksOrganize",
+                    "group": "navigation"
+                },
+                {
+                    "command": "bookmarks.organize.refresh",
+                    "when": "view == bookmarksOrganize",
+                    "group": "navigation"
                 }
             ],
             "view/item/context": [

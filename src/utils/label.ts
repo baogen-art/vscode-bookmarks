@@ -37,10 +37,10 @@ export function formatBookmarkLabel(label: string): string {
     }
 
     // 2. 处理方括号内部：特殊符号换成 "-"
-    // 允许字母、数字，其余替换为 "-"
+    // 允许字母、数字、$，其余替换为 "-"
     // 连续的多个特殊符号合并为一个 "-"
     const cleanedBracket = bracketContent
-        .replace(/[^a-zA-Z0-9]/g, '-')
+        .replace(/[^a-zA-Z0-9$]/g, '-')
         .replace(/-+/g, '-')        // 合并连续的 -
         .replace(/^-+|-+$/g, '');   // 去除首尾的 -
 

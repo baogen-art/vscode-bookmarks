@@ -18,6 +18,7 @@ import { loadBookmarks, saveBookmarks } from "./storage/workspaceState";
 import { pickController } from "./quickpick/controllerPicker";
 import { expandSelectionToNextBookmark, selectBookmarkedLines, shrinkSelection } from "./selections";
 import { BookmarksExplorer } from "./sidebar/bookmarkProvider";
+import { OrganizeViewProvider } from "./sidebar/organizeViewProvider";
 import { BookmarksSearchViewProvider } from "./sidebar/searchViewProvider";
 import { parsePosition, Point } from "./sidebar/parser";
 import { Sticky } from "./sticky/stickyLegacy";
@@ -73,6 +74,35 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const bookmarkExplorer = new BookmarksExplorer(controllers);
     const bookmarkProvider = bookmarkExplorer.getProvider();    
+
+    const organizeViewProvider = new OrganizeViewProvider(context.extensionUri, controllers);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(OrganizeViewProvider.viewType, organizeViewProvider)
+    );
+
+    let refreshExplorerTimeout: NodeJS.Timeout | undefined;
+    organizeViewProvider.onDidUpdateBookmarks(() => {
+        if (refreshExplorerTimeout) {
+            clearTimeout(refreshExplorerTimeout);
+        }
+        refreshExplorerTimeout = setTimeout(() => {
+            bookmarkProvider.refresh();
+        }, 500);
+    });
+
+    vscode.commands.registerCommand("bookmarks.organize.search", async () => {
+        const layer = await vscode.window.showInputBox({
+            prompt: "输入要整理的层级名称（如: a）",
+            placeHolder: "层级名称"
+        });
+        if (layer) {
+            await organizeViewProvider.search(layer);
+        }
+    });
+
+    vscode.commands.registerCommand("bookmarks.organize.refresh", async () => {
+        await organizeViewProvider.refresh();
+    });
 
     let searchDebounceTimeout: NodeJS.Timeout | undefined;
     searchViewProvider.onDidChangeSearchQuery(query => {
