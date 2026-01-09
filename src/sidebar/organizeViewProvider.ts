@@ -329,10 +329,23 @@ export class OrganizeViewProvider implements vscode.WebviewViewProvider {
     }
 
     private openBookmark(bookmark: BookmarkPreview) {
-        vscode.workspace.openTextDocument(bookmark.uri).then(doc => {
+        // 当数据从 Webview 传回时，bookmark.uri 已不再是 vscode.Uri 实例，需要重新转换
+        let uri: vscode.Uri;
+        const uriData = bookmark.uri as any;
+        if (uriData.scheme) {
+            uri = vscode.Uri.from(uriData);
+        } else if (uriData.fsPath) {
+            uri = vscode.Uri.file(uriData.fsPath);
+        } else {
+            uri = vscode.Uri.parse(uriData.toString());
+        }
+
+        vscode.workspace.openTextDocument(uri).then(doc => {
             vscode.window.showTextDocument(doc, {
                 selection: new vscode.Range(bookmark.line - 1, bookmark.column, bookmark.line - 1, bookmark.column)
             });
+        }, err => {
+            vscode.window.showErrorMessage(`无法打开文件: ${err}`);
         });
     }
 
@@ -477,10 +490,10 @@ export class OrganizeViewProvider implements vscode.WebviewViewProvider {
                                         <path d="M3 3v10.3l4.5-3.2 4.5 3.2V3H3zm8 9.1l-3.5-2.5-3.5 2.5V4h7v8.1z"/>
                                     </svg>
                                 </div>
-                                <span class="bookmark-label">\${b.displayLabel}</span>
+                                <span class="bookmark-label" title="\${b.file}:\${b.line}">\${b.displayLabel}</span>
                             \`;
                             
-                            item.onclick = () => {
+                            item.onclick = (e) => {
                                 vscode.postMessage({ type: 'openBookmark', bookmark: b });
                             };
 
