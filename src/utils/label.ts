@@ -9,7 +9,7 @@
  * @returns 格式化后的标签
  */
 export function formatBookmarkLabel(label: string): string {
-    if (!label) return "[]";
+    if (!label) return "[default]";
 
     let formattedLabel = label.trim();
     
@@ -20,10 +20,21 @@ export function formatBookmarkLabel(label: string): string {
     let bracketContent = "";
     let remainingContent = "";
 
-    if (openBracketIndex === -1 || closeBracketIndex === -1 || closeBracketIndex < openBracketIndex) {
-        // 没有合法的方括号，整体作为剩余内容，前面补 []
+    if (openBracketIndex === -1) {
+        // 完全没有 [，整体作为剩余内容，前面补 []
         bracketContent = "";
         remainingContent = formattedLabel;
+    } else if (closeBracketIndex === -1 || closeBracketIndex < openBracketIndex) {
+        // 有 [ 但没有 ]，或者 ] 在 [ 之前
+        // 尝试寻找 [ 之后第一个空格，作为标签结束
+        const firstSpaceAfterOpen = formattedLabel.indexOf(' ', openBracketIndex);
+        if (firstSpaceAfterOpen === -1) {
+            bracketContent = formattedLabel.substring(openBracketIndex + 1);
+            remainingContent = "";
+        } else {
+            bracketContent = formattedLabel.substring(openBracketIndex + 1, firstSpaceAfterOpen);
+            remainingContent = formattedLabel.substring(firstSpaceAfterOpen + 1).trim();
+        }
     } else {
         // 提取方括号内容和剩余内容
         // 改进：保留方括号之前的内容，将其并入剩余内容中
@@ -44,5 +55,7 @@ export function formatBookmarkLabel(label: string): string {
         .replace(/-+/g, '-')        // 合并连续的 -
         .replace(/^-+|-+$/g, '');   // 去除首尾的 -
 
-    return `[${cleanedBracket}]${remainingContent}`;
+    const finalBracket = cleanedBracket || "default";
+
+    return `[${finalBracket}]${remainingContent}`;
 }
