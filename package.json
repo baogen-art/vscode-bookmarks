@@ -60,8 +60,19 @@
         "views": {
             "bookmarks": [
                 {
+                    "id": "bookmarksSearch",
+                    "type": "webview",
+                    "name": "搜索",
+                    "visibility": "visible"
+                },
+                {
                     "id": "bookmarksExplorer",
                     "name": "%bookmarks.views.Explorer.name%"
+                },
+                {
+                    "id": "bookmarksOrganize",
+                    "type": "webview",
+                    "name": "分组整理"
                 },
                 {
                     "id": "bookmarksHelpAndFeedback",
@@ -156,6 +167,18 @@
                 "enablement": "!bookmarks.viewAsList"
             },
             {
+                "command": "_bookmarks.viewAsGrouped#sideBar",
+                "title": "分组",
+                "icon": "$(layers)",
+                "enablement": "!bookmarks.viewAsGrouped"
+            },
+            {
+                "command": "_bookmarks.viewAsGrouped#sideBar_off",
+                "title": "禁用分组",
+                "icon": "$(layers)",
+                "enablement": "bookmarks.viewAsGrouped"
+            },
+            {
                 "command": "bookmarks.openSettings",
                 "title": "%bookmarks.commands.openSettings.title%"
             },
@@ -235,6 +258,16 @@
                 "command": "bookmarks.export",
                 "title": "%bookmarks.commands.export.title%",
                 "category": "%bookmarks.commands.category.bookmarks%"
+            },
+            {
+                "command": "bookmarks.organize.search",
+                "title": "在整理区搜索",
+                "icon": "$(search)"
+            },
+            {
+                "command": "bookmarks.organize.refresh",
+                "title": "重新加载整理区",
+                "icon": "$(refresh)"
             }
         ],
         "menus": {
@@ -350,6 +383,16 @@
                     "group": "navigation@10"
                 },
                 {
+                    "command": "_bookmarks.viewAsGrouped#sideBar",
+                    "when": "view == bookmarksExplorer && !bookmarks.viewAsGrouped",
+                    "group": "navigation@11"
+                },
+                {
+                    "command": "_bookmarks.viewAsGrouped#sideBar_off",
+                    "when": "view == bookmarksExplorer && bookmarks.viewAsGrouped",
+                    "group": "navigation@11"
+                },
+                {
                     "submenu": "bookmarks.sideBar.title",
                     "when": "view == bookmarksExplorer",
                     "group": "1_bookmarks"
@@ -368,6 +411,16 @@
                     "command": "bookmarks.openSettings",
                     "when": "view == bookmarksExplorer",
                     "group": "3_bookmarks"
+                },
+                {
+                    "command": "bookmarks.organize.search",
+                    "when": "view == bookmarksOrganize",
+                    "group": "navigation"
+                },
+                {
+                    "command": "bookmarks.organize.refresh",
+                    "when": "view == bookmarksOrganize",
+                    "group": "navigation"
                 }
             ],
             "view/item/context": [
@@ -452,6 +505,16 @@
                 {
                     "command": "_bookmarks.viewAsList#sideBar",
                     "group": "bookmarks#sideBar.view@2"
+                },
+                {
+                    "command": "_bookmarks.viewAsGrouped#sideBar",
+                    "group": "bookmarks#sideBar.view@3",
+                    "when": "!bookmarks.viewAsGrouped"
+                },
+                {
+                    "command": "_bookmarks.viewAsGrouped#sideBar_off",
+                    "group": "bookmarks#sideBar.view@3",
+                    "when": "bookmarks.viewAsGrouped"
                 }
             ]
         },

@@ -29,6 +29,7 @@ export class BookmarkNode extends TreeItem {
     ) {
         super(label, collapsibleState);
 
+        this.tooltip = label;
         this.description = relativePath;
         const iconFillColor = workspace.getConfiguration("bookmarks").get("gutterIconFillColor", DEFAULT_GUTTER_ICON_FILL_COLOR);
         const iconBorderColor = workspace.getConfiguration("bookmarks").get("gutterIconBorderColor", DEFAULT_GUTTER_ICON_BORDER_COLOR);

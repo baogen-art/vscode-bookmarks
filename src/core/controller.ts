@@ -59,6 +59,9 @@ export interface BookmarkClearEvent {
 export class Controller {
     public files: File[];
     public workspaceFolder: WorkspaceFolder | undefined;
+    private static _globalVersion = 0;
+    public static get globalVersion() { return Controller._globalVersion; }
+    private static incrementVersion() { Controller._globalVersion++; }
 
     private onDidClearBookmarksEmitter = new vscode.EventEmitter<BookmarkClearEvent>();
     get onDidClearBookmarks(): vscode.Event<BookmarkClearEvent> {
@@ -74,23 +77,23 @@ export class Controller {
     private onDidUpdateBookmarkEmitter = new vscode.EventEmitter<BookmarkUpdated>();
     get onDidUpdateBookmark(): vscode.Event<BookmarkUpdated> { return this.onDidUpdateBookmarkEmitter.event; }
 
-// tslint:disable-next-line: member-ordering
-    public static normalize(uri: string): string {
-            // a simple workaround for what appears to be a vscode.Uri bug
-            // (inconsistent fsPath values for the same document, ex. ///foo/x.cpp and /foo/x.cpp)
-            return uri.replace("///", "/");
-        }
-        
-// tslint:disable-next-line: member-ordering
-        // public storage: Storage.BookmarksStorage;
-        // public bookmarks: File[];
-// tslint:disable-next-line: member-ordering
-        public activeFile: File = undefined;
+    constructor(workspaceFolder: WorkspaceFolder | undefined) {
+        this.workspaceFolder = workspaceFolder;
+        this.files = [];
 
-        constructor(workspaceFolder: WorkspaceFolder | undefined) {
-            this.workspaceFolder = workspaceFolder;
-            this.files = [];
-        }
+        this.onDidAddBookmark(() => Controller.incrementVersion());
+        this.onDidRemoveBookmark(() => Controller.incrementVersion());
+        this.onDidUpdateBookmark(() => Controller.incrementVersion());
+        this.onDidClearBookmarks(() => Controller.incrementVersion());
+    }
+
+    public static normalize(uri: string): string {
+        // a simple workaround for what appears to be a vscode.Uri bug
+        // (inconsistent fsPath values for the same document, ex. ///foo/x.cpp and /foo/x.cpp)
+        return uri.replace("///", "/");
+    }
+
+    public activeFile: File = undefined;
 
         public dispose() {
             this.zip();

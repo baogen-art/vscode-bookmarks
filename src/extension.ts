@@ -18,11 +18,15 @@ import { loadBookmarks, saveBookmarks } from "./storage/workspaceState";
 import { pickController } from "./quickpick/controllerPicker";
 import { expandSelectionToNextBookmark, selectBookmarkedLines, shrinkSelection } from "./selections";
 import { BookmarksExplorer } from "./sidebar/bookmarkProvider";
+import { OrganizeViewProvider } from "./sidebar/organizeViewProvider";
+import { BookmarksSearchViewProvider } from "./sidebar/searchViewProvider";
 import { parsePosition, Point } from "./sidebar/parser";
 import { Sticky } from "./sticky/stickyLegacy";
 import { updateStickyBookmarks } from "./sticky/sticky";
 import { suggestLabel, useSelectionWhenAvailable } from "./suggestion";
 import { appendPath, getRelativePath } from "./utils/fs";
+import { formatBookmarkLabel } from "./utils/label";
+import { TagManager } from "./core/tagManager";
 import { isInDiffEditor, previewPositionInDocument, revealPosition } from "./utils/reveal";
 import { registerOpenSettings } from "./commands/openSettings";
 import { registerSupportBookmarks } from "./commands/supportBookmarks";
@@ -44,6 +48,9 @@ export async function activate(context: vscode.ExtensionContext) {
     let controllers: Controller[] = [];
     let activeEditorCountLine: number;
     let timeout = null;
+    let activeEditor = vscode.window.activeTextEditor;
+    let bookmarkDecorationType = createBookmarkDecorations();
+    context.subscriptions.push(...bookmarkDecorationType);
 
     await registerWhatsNew();
     await registerWalkthrough();
@@ -55,59 +62,75 @@ export async function activate(context: vscode.ExtensionContext) {
     
     // load pre-saved bookmarks
     await loadWorkspaceState();
+
+    // 更新当前活动的编辑器
+    if (vscode.window.activeTextEditor) {
+        activeEditor = vscode.window.activeTextEditor;
+        // 在多个 controller 中找到匹配当前文件路径的那个
+        const controller = controllers.find(c => {
+            const workspacePath = c.workspaceFolder?.uri?.fsPath;
+            return workspacePath && activeEditor.document.uri.fsPath.startsWith(workspacePath);
+        });
+        
+        if (controller) {
+            activeController = controller;
+            activeController.activeFile = activeController.fromUri(activeEditor.document.uri);
+            updateDecorations();
+        }
+    }
     
     registerOpenSettings();
     registerSupportBookmarks();
     registerExport(() => controllers);
     registerHelpAndFeedbackView(context);
 
-    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(cfg => {
-        // Allow change the gutterIcon without reload
-        if (cfg.affectsConfiguration("bookmarks.gutterIconFillColor") || 
-            cfg.affectsConfiguration("bookmarks.gutterIconBorderColor") ||
-            cfg.affectsConfiguration("bookmarks.overviewRulerLane")) {
-            if (bookmarkDecorationType.length > 0) {
-                bookmarkDecorationType.forEach(b => b.dispose());
-            }
-
-            bookmarkDecorationType = createBookmarkDecorations();
-            context.subscriptions.push(...bookmarkDecorationType);
-
-            updateDecorations();
-            bookmarkProvider.refresh();
-        }
-        
-        if (cfg.affectsConfiguration("bookmarks.saveBookmarksInProject")) {
-            splitOrMergeFilesInMultiRootControllers();
-            saveWorkspaceState();
-        }
-
-        if (cfg.affectsConfiguration("bookmarks.sideBar.countBadge")) {
-            bookmarkExplorer.updateBadge();
-        }
-
-        if (cfg.affectsConfiguration("bookmarks.sideBar.hideWelcome")) {
-            toggleSideBarWelcomeVisibility();
-        }
-    }));
-
-    let bookmarkDecorationType = createBookmarkDecorations();
-    context.subscriptions.push(...bookmarkDecorationType);
-
-    // Connect it to the Editors Events
-    let activeEditor = vscode.window.activeTextEditor;
-
-    if (activeEditor) {
-        getActiveController(activeEditor.document);
-        activeController.addFile(activeEditor.document.uri);
-        activeEditorCountLine = activeEditor.document.lineCount;
-        activeController.activeFile = activeController.fromUri(activeEditor.document.uri);
-        triggerUpdateDecorations();
-        updateLinesWithBookmarkContext(activeController.activeFile);
-    }
+    const searchViewProvider = new BookmarksSearchViewProvider(context.extensionUri, controllers);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(BookmarksSearchViewProvider.viewType, searchViewProvider)
+    );
 
     const bookmarkExplorer = new BookmarksExplorer(controllers);
     const bookmarkProvider = bookmarkExplorer.getProvider();    
+
+    const organizeViewProvider = new OrganizeViewProvider(context.extensionUri, controllers);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(OrganizeViewProvider.viewType, organizeViewProvider)
+    );
+
+    let refreshExplorerTimeout: NodeJS.Timeout | undefined;
+    organizeViewProvider.onDidUpdateBookmarks(() => {
+        if (refreshExplorerTimeout) {
+            clearTimeout(refreshExplorerTimeout);
+        }
+        refreshExplorerTimeout = setTimeout(() => {
+            bookmarkProvider.refresh();
+        }, 500);
+    });
+
+    vscode.commands.registerCommand("bookmarks.organize.search", async () => {
+        const layer = await vscode.window.showInputBox({
+            prompt: "输入要整理的层级名称（如: a）",
+            placeHolder: "层级名称"
+        });
+        if (layer) {
+            await organizeViewProvider.search(layer);
+        }
+    });
+
+    vscode.commands.registerCommand("bookmarks.organize.refresh", async () => {
+        await organizeViewProvider.refresh();
+    });
+
+    let searchDebounceTimeout: NodeJS.Timeout | undefined;
+    searchViewProvider.onDidChangeSearchQuery(query => {
+        if (searchDebounceTimeout) {
+            clearTimeout(searchDebounceTimeout);
+        }
+        searchDebounceTimeout = setTimeout(() => {
+            bookmarkProvider.filterQuery = query;
+            searchDebounceTimeout = undefined;
+        }, 500);
+    });
 
     bookmarkExplorer.updateBadge();
 
@@ -130,17 +153,27 @@ export async function activate(context: vscode.ExtensionContext) {
         bookmarkProvider.refresh();
     }   
     
-    const viewAsList = Container.context.globalState.get<boolean>("viewAsList", false);
+    const viewAsList = Container.context.globalState.get<boolean>("viewAsList", true);
     vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", viewAsList);
+    const viewAsGrouped = Container.context.globalState.get<boolean>("viewAsGrouped", false);
+    vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", viewAsGrouped);
     vscode.commands.registerCommand("_bookmarks.viewAsTree#sideBar", () => toggleViewAs(ViewAs.VIEW_AS_TREE));
     vscode.commands.registerCommand("_bookmarks.viewAsList#sideBar", () => toggleViewAs(ViewAs.VIEW_AS_LIST));
+    vscode.commands.registerCommand("_bookmarks.viewAsGrouped#sideBar", () => toggleViewAs(ViewAs.VIEW_AS_GROUPED));
+    vscode.commands.registerCommand("_bookmarks.viewAsGrouped#sideBar_off", () => toggleViewAs(ViewAs.VIEW_AS_TREE));
     function toggleViewAs(view: ViewAs) {
         if (view === ViewAs.VIEW_AS_LIST) {
             vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", true);
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", false);
+        } else if (view === ViewAs.VIEW_AS_GROUPED) {
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", false);
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", true);
         } else {
             vscode.commands.executeCommand("setContext", "bookmarks.viewAsList", false);
+            vscode.commands.executeCommand("setContext", "bookmarks.viewAsGrouped", false);
         }
         Container.context.globalState.update("viewAsList", view === ViewAs.VIEW_AS_LIST);
+        Container.context.globalState.update("viewAsGrouped", view === ViewAs.VIEW_AS_GROUPED);
         bookmarkProvider.refresh();
     }
 
@@ -723,12 +756,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     function askForBookmarkLabel(index: number, position: vscode.Position, oldLabel?: string, jumpToPosition?: boolean,
                                  book?: File) {
-        const ibo = <vscode.InputBoxOptions> {
-            prompt: vscode.l10n.t("Bookmark Label"),
-            placeHolder: vscode.l10n.t("Type a label for your bookmark"),
-            value: oldLabel
-        };
-        vscode.window.showInputBox(ibo).then(bookmarkLabel => {
+        showTagInputBox(oldLabel || "", oldLabel || "").then(bookmarkLabel => {
             if (typeof bookmarkLabel === "undefined") {
                 return;
             }
@@ -740,7 +768,8 @@ export async function activate(context: vscode.ExtensionContext) {
             if (index >= 0) {
                 activeController.removeBookmark(index, position.line, book);
             }
-            activeController.addBookmark(position, bookmarkLabel, book);
+            const formattedLabel = formatBookmarkLabel(bookmarkLabel);
+            activeController.addBookmark(position, formattedLabel, book);
             
             // toggle editing mode
             if (jumpToPosition) {
@@ -797,6 +826,197 @@ export async function activate(context: vscode.ExtensionContext) {
         // bookmarkExplorer.updateBadge();
     }
 
+    async function showTagInputBox(suggestion: string, oldLabel: string): Promise<string | undefined> {
+        return new Promise((resolve) => {
+            const quickPick = vscode.window.createQuickPick();
+            quickPick.title = vscode.l10n.t("Bookmark Label");
+            quickPick.placeholder = vscode.l10n.t("Type a label for your bookmark");
+            
+            // 初始值处理
+            let initialValue = suggestion || oldLabel || "[]";
+            if (!initialValue.includes("[") && !initialValue.includes("]")) {
+                initialValue = `[${initialValue}]`;
+            }
+            quickPick.value = initialValue;
+
+            const allNodes = TagManager.getAllTagNodes(controllers);
+
+            // 针对 QuickPick 的特殊行为优化
+            // 当 value 改变时，QuickPick 会自动过滤 items。
+            // 我们的补全是基于逻辑生成的，需要关闭自动过滤或动态更新
+            quickPick.items = []; // 初始清空
+
+            const updateItems = (value: string) => {
+                // 匹配方括号内的内容
+                const openIdx = value.indexOf('[');
+                const closeIdx = value.indexOf(']');
+                
+                let content = "";
+                if (openIdx !== -1) {
+                    if (closeIdx !== -1 && closeIdx > openIdx) {
+                        // 有完整的 []
+                        content = value.substring(openIdx + 1, closeIdx);
+                    } else {
+                        // 只有 [，取 [ 之后到空格或结尾的内容
+                        const spaceIdx = value.indexOf(' ', openIdx);
+                        if (spaceIdx === -1) {
+                            content = value.substring(openIdx + 1);
+                        } else {
+                            content = value.substring(openIdx + 1, spaceIdx);
+                        }
+                    }
+
+                    const completions = TagManager.getCompletions(content, allNodes);
+                    
+                    const newItems = completions.map(c => ({ 
+                        label: c, // 只显示节点名称，如 "a"
+                        description: "Add this tag node",
+                        alwaysShow: true 
+                    }));
+                    
+                    quickPick.items = newItems;
+                } else {
+                    quickPick.items = [];
+                }
+            };
+
+            // 初始补全项
+            updateItems(quickPick.value);
+
+            quickPick.onDidChangeValue(value => {
+                // 如果用户输入的是 [] 且之前已经有了 items，保持 items 不变，
+                // 除非是由于 value 改变导致的过滤逻辑失效
+                updateItems(value);
+            });
+
+            quickPick.onDidAccept(() => {
+                // 如果当前有选中的建议项
+                if (quickPick.selectedItems.length > 0) {
+                    const selectedNode = quickPick.selectedItems[0].label; // 例如 "a"
+                    const currentValue = quickPick.value;
+                    
+                    // 找到当前输入框中的 [] 位置
+                    const openIdx = currentValue.indexOf('[');
+                    const closeIdx = currentValue.indexOf(']');
+                    
+                    if (openIdx !== -1) {
+                        // 提取括号内的现有内容
+                        let contentBeforeClose = "";
+                        if (closeIdx !== -1 && closeIdx > openIdx) {
+                            contentBeforeClose = currentValue.substring(openIdx + 1, closeIdx);
+                        } else {
+                            // 如果没有闭合括号，尝试按空格分割或取到结尾
+                            const spaceIdx = currentValue.indexOf(' ', openIdx);
+                            contentBeforeClose = spaceIdx === -1 
+                                ? currentValue.substring(openIdx + 1) 
+                                : currentValue.substring(openIdx + 1, spaceIdx);
+                        }
+
+                        // 将选中的节点替换/追加到括号内的最后一个部分
+                        const parts = contentBeforeClose.split('-');
+                        parts[parts.length - 1] = selectedNode;
+                        const newContent = parts.join('-') + '-'; // 补齐 '-'
+                        
+                        // 重新拼装完整字符串，确保保留右括号和后面的内容
+                        let newValue = "";
+                        let newCursorOffset = 0;
+                        if (closeIdx !== -1 && closeIdx > openIdx) {
+                            newValue = currentValue.substring(0, openIdx + 1) + 
+                                       newContent + 
+                                       currentValue.substring(closeIdx);
+                            newCursorOffset = openIdx + 1 + newContent.length;
+                        } else {
+                            // 补上缺失的右括号
+                            const suffix = currentValue.substring(openIdx + 1 + contentBeforeClose.length);
+                            newValue = currentValue.substring(0, openIdx + 1) + 
+                                       newContent + 
+                                       ']' + suffix;
+                            newCursorOffset = openIdx + 1 + newContent.length;
+                        }
+                        
+                        quickPick.value = newValue;
+                        
+                        // 强制通过设置 value 来尝试让 VS Code 把光标放到最后，
+                        // 但由于 VS Code QuickPick 的限制，我们采用一种“欺骗”方式：
+                        // 如果有右括号，我们暂时去掉右括号后面的内容，让光标落在最后，然后再补回来？
+                        // 不，更可靠的方法是：只保留到 '-' 为止的内容，让用户继续输入，
+                        // 等用户最终回车时再由 formatBookmarkLabel 统一处理右括号和备注。
+                        
+                        // 既然用户希望光标在 '-' 后面，我们就在补全时，把 '-' 之后的所有内容（包括 ] 和备注）暂时去掉
+                        // 这样 VS Code 就会自然地把光标停在 '-' 后面。
+                        const valueToSet = currentValue.substring(0, openIdx + 1) + newContent;
+                        const remainingToRestore = (closeIdx !== -1 && closeIdx > openIdx) 
+                            ? currentValue.substring(closeIdx)
+                            : "]" + currentValue.substring(openIdx + 1 + contentBeforeClose.length);
+                        
+                        quickPick.value = valueToSet;
+                        
+                        // 记录下剩余部分，在下一次 updateItems 或回车时拼回去？
+                        // 这种做法比较复杂。其实最简单且符合 VS Code 行为的做法是：
+                        // 如果 value 改变，光标默认会在末尾。
+                        // 所以我们只需要让 '-' 成为 value 的末尾即可。
+                        
+                        // 为了不丢掉用户的备注，我们把备注存到一个临时变量里，或者直接让用户在补全完标签后再输入备注。
+                        // 但考虑到用户体验，我们还是尝试保留：
+                        quickPick.value = valueToSet + remainingToRestore;
+                        // 此时光标会在 newValue 的末尾。
+                        
+                        // 重点：VS Code QuickPick API 确实不支持设置光标位置。
+                        // 唯一的办法是：补全时，不补全右括号及其后面的内容，
+                        // 让用户一路补全节点，最后想写备注时再写，或者由我们最后自动补齐 ]。
+                        
+                        const simplifiedValue = currentValue.substring(0, openIdx + 1) + newContent;
+                        const extraText = (closeIdx !== -1 && closeIdx > openIdx)
+                            ? currentValue.substring(closeIdx + 1).trim()
+                            : currentValue.substring(openIdx + 1 + contentBeforeClose.length).trim();
+                        
+                        // 如果后面有备注，补全后变成 "[a-b-] 备注"，光标会在最后。
+                        // 如果我们希望光标在 - 后面，我们只能把 newValue 设为 "[a-b-"
+                        // 然后把备注暂时存在 description 或者某个地方？不，这太奇怪了。
+                        
+                        // 另一种尝试：利用 VS Code 会把光标放在新插入文本之后的特性（如果能模拟输入）
+                        // 但 QuickPick 只能设置整个 value。
+                        
+                        // 最终方案：为了连续补全的爽快感，补全节点时暂时移除右括号和备注，
+                        // 让输入框只剩下 "[a-b-"，这样光标一定在横杠后。
+                        // 用户补全完所有节点后，直接按回车，我们在 resolve 前自动补齐括号。
+                        
+                        quickPick.value = simplifiedValue;
+                        if (extraText) {
+                            // 如果有备注，把它放在 placeholder 里提醒用户，或者等用户最后再输
+                            quickPick.placeholder = `Tag: ${simplifiedValue}], Note: ${extraText}`;
+                        }
+                    } else {
+                        // 兜底逻辑：如果没有找到 [，直接补全为 [a-]
+                        quickPick.value = `[${selectedNode}-]${currentValue}`;
+                    }
+                    
+                    // 清空选中状态，这样下次回车就会触发 else 分支提交书签
+                    quickPick.selectedItems = [];
+                    // 重新触发一次 items 更新
+                    updateItems(quickPick.value);
+                    return;
+                }
+                
+                // 如果没有选中项，说明用户是在输入框里直接按回车，此时提交结果
+                let finalValue = quickPick.value;
+                // 如果结尾没有 ]，补上
+                if (finalValue.includes('[') && !finalValue.includes(']')) {
+                    finalValue += ']';
+                }
+                resolve(finalValue);
+                quickPick.hide();
+            });
+
+            quickPick.onDidHide(() => {
+                resolve(undefined);
+                quickPick.dispose();
+            });
+
+            quickPick.show();
+        });
+    }
+
     async function toggleLabeled(params?: EditorLineNumberContextParams) {
 
         const selections: Selection[] = [];
@@ -822,7 +1042,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
         let suggestion = suggestLabel(vscode.window.activeTextEditor.selection);
         if (!params && suggestion !== "" && useSelectionWhenAvailable()) {
-            if (await activeController.toggle(selections, suggestion)) {
+            const formattedSuggestion = formatBookmarkLabel(suggestion);
+            if (await activeController.toggle(selections, formattedSuggestion)) {
                 vscode.window.showTextDocument(vscode.window.activeTextEditor.document, {preview: false, viewColumn: vscode.window.activeTextEditor.viewColumn} );
             }
             sortBookmarks(activeController.activeFile); 
@@ -839,24 +1060,16 @@ export async function activate(context: vscode.ExtensionContext) {
             oldLabel = index > -1 ? activeController.activeFile.bookmarks[index].label : "";
             suggestion = oldLabel;
         }
-        // let oldLabel: string = "";
-        // if (selections.length === 1) {
-        //     const index = bookmarks.activeBookmark.indexOfBookmark(selections[0].active.line);
-        //     oldLabel = index > -1 ? bookmarks.activeBookmark.bookmarks[index].label : "";
-        // }
-        const ibo = <vscode.InputBoxOptions> {
-            prompt: vscode.l10n.t("Bookmark Label"),
-            placeHolder: vscode.l10n.t("Type a label for your bookmark"),
-            value: !params ? suggestion : ""
-        };
-        const newLabel = await vscode.window.showInputBox(ibo);
+
+        const newLabel = await showTagInputBox(suggestion, oldLabel);
         if (typeof newLabel === "undefined") { return; }
         if (newLabel === "" && oldLabel === "") {
             vscode.window.showWarningMessage(vscode.l10n.t("You must define a label for the bookmark."));
             return;
         }
 
-        if (await activeController.toggle(selections, newLabel)) {
+        const formattedLabel = formatBookmarkLabel(newLabel);
+        if (await activeController.toggle(selections, formattedLabel)) {
             vscode.window.showTextDocument(vscode.window.activeTextEditor.document, {preview: false, viewColumn: vscode.window.activeTextEditor.viewColumn} );
         }
 
